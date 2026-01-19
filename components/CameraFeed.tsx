@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import Tesseract from 'tesseract.js';
 import { OCRBlock, LogEntry } from '@/lib/types';
 
@@ -20,14 +20,21 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
   useEffect(() => {
     async function setupCamera() {
       try {
-        const mediaStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' }
-        });
+        const constraints = {
+          video: { 
+            facingMode: 'environment',
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          }
+        };
+        const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
         setStream(mediaStream);
         if (videoRef.current) {
           videoRef.current.srcObject = mediaStream;
+          videoRef.current.onloadedmetadata = () => {
+             onLog(`Camera Ready: ${videoRef.current?.videoWidth}x${videoRef.current?.videoHeight}`, 'info');
+          };
         }
-        onLog('Camera initialized', 'info');
       } catch (err) {
         console.error("Camera Error:", err);
         onLog('Failed to access camera', 'error');
@@ -40,69 +47,87 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
         stream.getTracks().forEach(track => track.stop());
       }
     };
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // OCR Loop
   useEffect(() => {
     let intervalId: NodeJS.Timeout;
+    let isProcessing = false;
 
     const runOCR = async () => {
-      if (!videoRef.current || !canvasRef.current || !isScanning) return;
+      if (!videoRef.current || isProcessing || !isScanning) return;
 
       const video = videoRef.current;
-      const canvas = canvasRef.current;
       
-      // Ensure video dimensions are available
-      if (video.videoWidth === 0 || video.videoHeight === 0) return;
+      if (video.readyState !== 4 || video.videoWidth === 0) return;
 
-      // Match canvas to video size
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-
-      // Draw current video frame to canvas for OCR
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      isProcessing = true;
 
       try {
-        const result = await Tesseract.recognize(canvas, 'eng', {
-            // logger: m => console.log(m) // Optional logger
-        });
+          // Create an offscreen canvas for OCR
+          const captureCanvas = document.createElement('canvas');
+          captureCanvas.width = video.videoWidth;
+          captureCanvas.height = video.videoHeight;
+          const ctx = captureCanvas.getContext('2d');
+          
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+            
+            // Log for debugging (optional: could export to see what we captured)
+            // const dataUrl = captureCanvas.toDataURL();
+            // console.log("Capturing frame for OCR...", captureCanvas.width, captureCanvas.height);
 
-        // Tesseract.js Page object structure: data -> blocks -> paragraphs -> lines -> words
-        const allWords: any[] = [];
-        result.data.blocks?.forEach(block => {
-            block.paragraphs.forEach(para => {
-                para.lines.forEach(line => {
-                    line.words.forEach(word => {
-                        allWords.push(word);
+            const result = await Tesseract.recognize(captureCanvas, 'eng', {
+                // logger: m => console.log(m)
+            });
+
+            // Tesseract.js Page object structure: data -> blocks -> paragraphs -> lines -> words
+            const allWords: any[] = [];
+            result.data.blocks?.forEach((block: any) => {
+                block.paragraphs?.forEach((para: any) => {
+                    para.lines?.forEach((line: any) => {
+                        line.words?.forEach((word: any) => {
+                            allWords.push(word);
+                        });
                     });
                 });
             });
-        });
 
-        const blocks: OCRBlock[] = allWords.map(w => ({
-          text: w.text,
-          bbox: {
-            x0: w.bbox.x0,
-            y0: w.bbox.y0,
-            x1: w.bbox.x1,
-            y1: w.bbox.y1
+            const blocks: OCRBlock[] = allWords.map(w => ({
+              text: w.text,
+              bbox: {
+                x0: w.bbox.x0,
+                y0: w.bbox.y0,
+                x1: w.bbox.x1,
+                y1: w.bbox.y1
+              }
+            }));
+            
+            // Only update if we found something, or at least log it
+            if (blocks.length > 0) {
+               setOcrBlocks(blocks);
+               onLog(`Detected ${blocks.length} text blocks`, 'info');
+            } else {
+               // Keep old blocks? Or clear? Clearing might be safer if we moved away.
+               // But if OCR failed due to blur, we might want to keep last known good?
+               // Let's clear to avoid confusion.
+               setOcrBlocks([]); 
+               // console.log("No text detected");
+            }
           }
-        }));
-
-        setOcrBlocks(blocks);
-        onLog(`Detected ${blocks.length} text blocks`, 'info');
 
       } catch (err) {
         console.error("OCR Error:", err);
         onLog('OCR processing failed', 'error');
+      } finally {
+        isProcessing = false;
       }
     };
 
     if (isScanning) {
-        intervalId = setInterval(runOCR, 5000); // Run every 5 seconds to save resources
-        runOCR(); // Run immediately once
+        intervalId = setInterval(runOCR, 2000); // Run every 2 seconds
+        // Wait a bit for video to stabilize before first run
+        setTimeout(runOCR, 1000); 
     }
 
     return () => clearInterval(intervalId);
@@ -114,20 +139,16 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
       const video = videoRef.current;
       if (!canvas || !video) return;
 
+      // Ensure canvas matches video size for correct overlay positioning
+      if (video.videoWidth > 0 && (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight)) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+      }
+
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
-      // Clear previous drawings but keep the video frame (if we want to see what was captured)
-      // Actually, we want the overlay to be transparent over the live video
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      // We need to re-draw the bounding boxes on every frame if we want them to stick? 
-      // But since the objects move, we only update positions on new OCR run.
-      // For now, just draw the boxes we have.
-      
-      // NOTE: Since the video is playing underneath, the canvas should ideally be absolute positioned on top of it.
-      // The OCR captured a snapshot. The boxes correspond to that snapshot. 
-      // If the camera moves, the boxes will be misaligned until next OCR.
       
       ctx.strokeStyle = '#00ff00';
       ctx.lineWidth = 2;
