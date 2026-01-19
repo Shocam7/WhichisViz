@@ -2,6 +2,7 @@
 
 import React, { useRef, useEffect, useState } from 'react';
 import { OCRBlock, LogEntry } from '@/lib/types';
+import { Camera, RefreshCw } from 'lucide-react';
 
 interface CameraFeedProps {
   onTextSelected: (text: string) => void;
@@ -14,7 +15,8 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [ocrBlocks, setOcrBlocks] = useState<OCRBlock[]>([]);
   const [stream, setStream] = useState<MediaStream | null>(null);
-  const [showDebug, setShowDebug] = useState(false);
+  const [capturedImage, setCapturedImage] = useState<string | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   // Initialize Camera
   useEffect(() => {
@@ -50,22 +52,17 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
 
-  // OCR Loop
-  useEffect(() => {
-    let intervalId: NodeJS.Timeout;
-    let isProcessing = false;
-
-    const runOCR = async () => {
-      if (!videoRef.current || isProcessing || !isScanning) return;
-
-      const video = videoRef.current;
+  const handleCapture = async () => {
+      if (!videoRef.current || isProcessing) return;
       
+      const video = videoRef.current;
       if (video.readyState !== 4 || video.videoWidth === 0) return;
 
-      isProcessing = true;
+      setIsProcessing(true);
+      onLog("Capturing image...", 'info');
 
       try {
-          // Create offscreen canvas to capture frame
+          // Capture frame
           const captureCanvas = document.createElement('canvas');
           captureCanvas.width = video.videoWidth;
           captureCanvas.height = video.videoHeight;
@@ -73,11 +70,12 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
           
           if (ctx) {
             ctx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
+            const base64Image = captureCanvas.toDataURL('image/jpeg', 0.9);
             
-            // Convert to Base64
-            const base64Image = captureCanvas.toDataURL('image/jpeg', 0.8);
+            setCapturedImage(base64Image); // Show static image
             
             // Call API
+            onLog("Analyzing text...", 'info');
             const response = await fetch('/api/ocr', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -88,38 +86,41 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
                 const data = await response.json();
                 if (data.blocks && Array.isArray(data.blocks)) {
                     setOcrBlocks(data.blocks);
-                    onLog(`Detected ${data.blocks.length} text blocks via Gemini`, 'info');
+                    onLog(`Detected ${data.blocks.length} text blocks`, 'success');
+                } else {
+                    onLog("No text found", 'info');
                 }
             } else {
-                console.error("OCR API failed");
+                onLog("OCR API failed", 'error');
             }
           }
-
-      } catch (err) {
-        console.error("OCR Error:", err);
+      } catch (err: any) {
+        console.error("Capture Error:", err);
+        onLog(`Error: ${err.message}`, 'error');
       } finally {
-        isProcessing = false;
+        setIsProcessing(false);
       }
-    };
+  };
 
-    if (isScanning) {
-        // Run less frequently to save API costs/latency (e.g., every 4 seconds)
-        intervalId = setInterval(runOCR, 4000); 
-        setTimeout(runOCR, 1000); 
-    }
-
-    return () => clearInterval(intervalId);
-  }, [isScanning, onLog]);
+  const handleRetake = () => {
+      setCapturedImage(null);
+      setOcrBlocks([]);
+      onLog("Ready to scan", 'info');
+  };
 
   // Draw Bounding Boxes Overlay
   useEffect(() => {
       const canvas = canvasRef.current;
       const video = videoRef.current;
-      if (!canvas || !video) return;
+      if (!canvas) return;
+      
+      // Determine dimensions based on what's visible (video or captured image)
+      const width = video?.videoWidth || 1920;
+      const height = video?.videoHeight || 1080;
 
-      if (video.videoWidth > 0 && (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight)) {
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
+      if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
       }
 
       const ctx = canvas.getContext('2d');
@@ -127,28 +128,32 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       
-      ctx.strokeStyle = '#00ff00';
-      ctx.lineWidth = 2;
-      ctx.fillStyle = 'rgba(0, 255, 0, 0.2)';
+      // Only draw if we have a captured image
+      if (capturedImage) {
+          ctx.strokeStyle = '#00ff00';
+          ctx.lineWidth = 4;
+          ctx.fillStyle = 'rgba(0, 255, 0, 0.2)';
 
-      ocrBlocks.forEach(block => {
-          // Bbox is normalized (0-1) in new implementation
-          const x0 = block.bbox.x0 * canvas.width;
-          const y0 = block.bbox.y0 * canvas.height;
-          const x1 = block.bbox.x1 * canvas.width;
-          const y1 = block.bbox.y1 * canvas.height;
-          
-          const w = x1 - x0;
-          const h = y1 - y0;
-          
-          ctx.strokeRect(x0, y0, w, h);
-          ctx.fillRect(x0, y0, w, h);
-      });
+          ocrBlocks.forEach(block => {
+              const x0 = block.bbox.x0 * canvas.width;
+              const y0 = block.bbox.y0 * canvas.height;
+              const x1 = block.bbox.x1 * canvas.width;
+              const y1 = block.bbox.y1 * canvas.height;
+              
+              const w = x1 - x0;
+              const h = y1 - y0;
+              
+              ctx.strokeRect(x0, y0, w, h);
+              ctx.fillRect(x0, y0, w, h);
+          });
+      }
 
-  }, [ocrBlocks]);
+  }, [ocrBlocks, capturedImage]);
 
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!capturedImage) return; // Only allow selection on captured image
+      
       const canvas = canvasRef.current;
       if (!canvas) return;
 
@@ -156,15 +161,12 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
       const scaleX = canvas.width / rect.width;
       const scaleY = canvas.height / rect.height;
 
-      // Click coordinates relative to canvas pixels
       const x = (e.clientX - rect.left) * scaleX;
       const y = (e.clientY - rect.top) * scaleY;
 
-      // Normalize click coordinates to 0-1 for comparison
       const normX = x / canvas.width;
       const normY = y / canvas.height;
 
-      // Find clicked block
       const clickedBlock = ocrBlocks.find(b => 
           normX >= b.bbox.x0 && normX <= b.bbox.x1 &&
           normY >= b.bbox.y0 && normY <= b.bbox.y1
@@ -172,27 +174,59 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
 
       if (clickedBlock) {
           onTextSelected(clickedBlock.text);
-          onLog(`Selected: "${clickedBlock.text}"`, 'success');
+          onLog(`Selected: "${clickedBlock.text.substring(0, 20)}..."`, 'success');
       }
   };
 
   return (
     <div className="relative w-full h-full bg-black">
-      {/* Video Element */}
+      {/* Video Element (Live Feed) */}
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted
-        className="absolute inset-0 w-full h-full object-cover"
+        className={`absolute inset-0 w-full h-full object-cover ${capturedImage ? 'hidden' : 'block'}`}
       />
+
+      {/* Captured Image Display (Frozen Frame) */}
+      {capturedImage && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img 
+            src={capturedImage} 
+            alt="Captured" 
+            className="absolute inset-0 w-full h-full object-cover"
+          />
+      )}
       
       {/* Canvas Overlay for interactions */}
       <canvas
         ref={canvasRef}
         onClick={handleCanvasClick}
-        className="absolute inset-0 w-full h-full object-cover cursor-crosshair"
+        className="absolute inset-0 w-full h-full object-cover cursor-crosshair z-10"
       />
+
+      {/* Capture/Retake Controls */}
+      <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 z-50 flex gap-4 pointer-events-auto">
+          {!capturedImage ? (
+              <button 
+                  onClick={handleCapture}
+                  disabled={isProcessing}
+                  className="flex items-center gap-2 bg-cyan-600 hover:bg-cyan-500 text-white px-6 py-3 rounded-full shadow-lg shadow-cyan-500/50 transition-all font-bold tracking-wide disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                  <Camera size={20} />
+                  {isProcessing ? 'SCANNING...' : 'SCAN TEXT'}
+              </button>
+          ) : (
+              <button 
+                  onClick={handleRetake}
+                  className="flex items-center gap-2 bg-zinc-700 hover:bg-zinc-600 text-white px-6 py-3 rounded-full shadow-lg transition-all font-bold tracking-wide"
+              >
+                  <RefreshCw size={20} />
+                  RETAKE
+              </button>
+          )}
+      </div>
     </div>
   );
 }
