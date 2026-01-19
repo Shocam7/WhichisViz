@@ -1,5 +1,5 @@
 {
-  "name": "whichisviz",
+  "name": "visionviz",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -19,7 +19,6 @@
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "tailwind-merge": "^3.4.0",
-    "tesseract.js": "^7.0.0",
     "three": "^0.182.0",
     "zod": "^4.3.5"
   },
