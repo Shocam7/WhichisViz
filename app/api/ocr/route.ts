@@ -2,104 +2,70 @@ import { NextRequest, NextResponse } from 'next/server';
 import { OCRBlock } from '@/lib/types';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// Using v1beta is correct for 2.0-flash
 const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
 
 export async function POST(req: NextRequest) {
   try {
     const { image } = await req.json();
 
-    if (!image) {
-      return NextResponse.json({ error: 'Image data is required' }, { status: 400 });
-    }
+    if (!image) return NextResponse.json({ error: 'Image data required' }, { status: 400 });
+    if (!GEMINI_API_KEY) return NextResponse.json({ error: 'API Key missing' }, { status: 500 });
 
-    if (!GEMINI_API_KEY) {
-      return NextResponse.json({ error: 'GEMINI_API_KEY not configured' }, { status: 500 });
-    }
-
-    // Prepare the image part (remove data:image/jpeg;base64, prefix if present)
     const base64Image = image.replace(/^data:image\/(png|jpeg|webp);base64,/, "");
 
     const prompt = `
-      Analyze the provided image and detect all visible text blocks.
-      Return a JSON object with a key "blocks" containing a list of detected text.
-      Each item in the list must have:
-      - "text": The content of the text.
-      - "box_2d": A list of 4 integers [ymin, xmin, ymax, xmax] representing the bounding box in a 0-1000 scale.
-      
-      Do not include any markdown formatting. Just the raw JSON.
+      Detect all visible text blocks.
+      Return a JSON object with a key "blocks".
+      Each block: {"text": "string", "box_2d": [ymin, xmin, ymax, xmax]} 
+      Scale: 0-1000.
     `;
 
     const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              { text: prompt },
-              {
-                inline_data: {
-                  mime_type: "image/jpeg",
-                  data: base64Image
-                }
-              }
-            ]
-          }
-        ],
+        contents: [{
+          parts: [
+            { text: prompt },
+            { inline_data: { mime_type: "image/jpeg", data: base64Image } }
+          ]
+        }],
         generationConfig: {
-            response_mime_type: "application/json"
+          response_mime_type: "application/json"
         }
       })
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Gemini OCR Error:", errorText);
-      return NextResponse.json({ error: 'Failed to process image' }, { status: 500 });
+      const errorData = await response.json();
+      // LOG THIS: It will tell you if it's an API Key error, Rate Limit, or Model error
+      console.error("Gemini API Refusal:", JSON.stringify(errorData, null, 2));
+      return NextResponse.json({ error: errorData.error?.message || 'Gemini Refusal' }, { status: response.status });
     }
 
     const data = await response.json();
-    const candidate = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    const candidateText = data.candidates?.[0]?.content?.parts?.[0]?.text;
     
-    if (!candidate) {
-         return NextResponse.json({ blocks: [] });
-    }
+    if (!candidateText) return NextResponse.json({ blocks: [] });
 
-    let parsedData;
-    try {
-        parsedData = JSON.parse(candidate);
-    } catch (e) {
-        console.error("Failed to parse Gemini OCR JSON", candidate);
-        return NextResponse.json({ error: 'Invalid JSON response' }, { status: 500 });
-    }
+    const parsedData = JSON.parse(candidateText);
 
-    const blocks: OCRBlock[] = (parsedData.blocks || []).map((b: any) => {
-        // Gemini returns [ymin, xmin, ymax, xmax] in 0-1000
-        // We need to convert to normalized 0-1 for the frontend to scale
-        const [ymin, xmin, ymax, xmax] = b.box_2d || [0,0,0,0];
-        
-        return {
-            text: b.text,
-            // We'll store normalized coords (0-1) in the bbox to make it resolution independent
-            // Note: CameraFeed expects pixel coords, but we can handle that conversion there if we pass normalized.
-            // However, to keep types consistent with previous implementation (which used absolute pixels from Tesseract),
-            // we should probably signal that these are normalized or change the type.
-            // For now, let's return normalized and let frontend scale.
-            bbox: {
-                y0: ymin / 1000,
-                x0: xmin / 1000,
-                y1: ymax / 1000,
-                x1: xmax / 1000
-            }
-        };
-    });
+    // Map and Normalize (0-1000 to 0-1)
+    const blocks: OCRBlock[] = (parsedData.blocks || []).map((b: any) => ({
+      text: b.text,
+      bbox: {
+        y0: b.box_2d[0] / 1000,
+        x0: b.box_2d[1] / 1000,
+        y1: b.box_2d[2] / 1000,
+        x1: b.box_2d[3] / 1000
+      }
+    }));
 
     return NextResponse.json({ blocks });
 
-  } catch (error) {
-    console.error("OCR Route Error:", error);
-    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+  } catch (error: any) {
+    console.error("Internal Route Error:", error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
