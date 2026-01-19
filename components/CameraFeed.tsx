@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useRef, useEffect, useState } from 'react';
-import Tesseract from 'tesseract.js';
+import { createWorker, Worker, PSM } from 'tesseract.js';
 import { OCRBlock, LogEntry } from '@/lib/types';
 
 interface CameraFeedProps {
@@ -13,129 +13,105 @@ interface CameraFeedProps {
 export default function CameraFeed({ onTextSelected, onLog, isScanning }: CameraFeedProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const debugCanvasRef = useRef<HTMLCanvasElement>(null); // New debug canvas
+  const workerRef = useRef<Worker | null>(null);
+  
   const [ocrBlocks, setOcrBlocks] = useState<OCRBlock[]>([]);
-  const [stream, setStream] = useState<MediaStream | null>(null);
-  const [showDebug, setShowDebug] = useState(false); // Toggle for debug view
+  const [isWorkerReady, setIsWorkerReady] = useState(false);
 
-  // Initialize Camera
+  // 1. Initialize Tesseract Worker once on mount
   useEffect(() => {
+    let isMounted = true;
+
+    async function initWorker() {
+      try {
+        onLog('Initializing OCR engine...', 'info');
+        // createWorker is the standard way to initialize in Tesseract.js v4/v5
+        const worker = await createWorker('eng');
+        
+        await worker.setParameters({
+          tessedit_pageseg_mode: PSM.SPARSE_TEXT, 
+        });
+        
+        if (isMounted) {
+          workerRef.current = worker;
+          setIsWorkerReady(true);
+          onLog('OCR engine ready', 'success');
+        }
+      } catch (err) {
+        onLog('Failed to initialize OCR engine', 'error');
+        console.error(err);
+      }
+    }
+
+    initWorker();
+
+    return () => {
+      isMounted = false;
+      workerRef.current?.terminate();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 2. Initialize Camera Stream
+  useEffect(() => {
+    let stream: MediaStream | null = null;
+
     async function setupCamera() {
       try {
         const constraints = {
           video: { 
             facingMode: 'environment',
-            width: { ideal: 1920 },
-            height: { ideal: 1080 }
+            width: { ideal: 1280 }, 
+            height: { ideal: 720 }
           }
         };
-        const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
-        setStream(mediaStream);
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
         if (videoRef.current) {
-          videoRef.current.srcObject = mediaStream;
-          videoRef.current.onloadedmetadata = () => {
-             onLog(`Camera Ready: ${videoRef.current?.videoWidth}x${videoRef.current?.videoHeight}`, 'info');
-          };
+          videoRef.current.srcObject = stream;
         }
       } catch (err) {
-        console.error("Camera Error:", err);
-        onLog('Failed to access camera', 'error');
+        onLog('Camera access denied or error occurred', 'error');
       }
     }
     setupCamera();
 
     return () => {
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
+      stream?.getTracks().forEach(track => track.stop());
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [onLog]);
 
-  // Image Processing Function
-  const preprocessImage = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
-      const imageData = ctx.getImageData(0, 0, width, height);
-      const data = imageData.data;
-      
-      // Simple Grayscale & High Contrast
-      for (let i = 0; i < data.length; i += 4) {
-          const r = data[i];
-          const g = data[i + 1];
-          const b = data[i + 2];
-          
-          // Luminance formula
-          const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-          
-          // Binarization (Thresholding)
-          // Dynamic thresholding would be better, but let's try a simple hard threshold first
-          // or just contrast stretching. Let's try boosting contrast.
-          const contrastFactor = 1.5; // Adjust as needed
-          const adjusted = (gray - 128) * contrastFactor + 128;
-          
-          // Clamp
-          const val = Math.max(0, Math.min(255, adjusted));
-          
-          data[i] = val;     // R
-          data[i+1] = val;   // G
-          data[i+2] = val;   // B
-      }
-      
-      ctx.putImageData(imageData, 0, 0);
-  };
-
-  // OCR Loop
+  // 3. OCR Processing Loop
   useEffect(() => {
     let intervalId: NodeJS.Timeout;
     let isProcessing = false;
 
     const runOCR = async () => {
-      if (!videoRef.current || isProcessing || !isScanning) return;
+      if (!videoRef.current || !workerRef.current || !isWorkerReady || isProcessing || !isScanning) return;
 
       const video = videoRef.current;
-      
       if (video.readyState !== 4 || video.videoWidth === 0) return;
 
       isProcessing = true;
 
       try {
-          // Create or reuse an offscreen canvas for OCR
-          const captureCanvas = document.createElement('canvas');
-          captureCanvas.width = video.videoWidth;
-          captureCanvas.height = video.videoHeight;
-          const ctx = captureCanvas.getContext('2d');
+        const captureCanvas = document.createElement('canvas');
+        captureCanvas.width = video.videoWidth;
+        captureCanvas.height = video.videoHeight;
+        const ctx = captureCanvas.getContext('2d');
+        
+        if (ctx) {
+          // --- PRE-PROCESSING ---
+          // Grayscale and Contrast boost helps the engine see characters
+          ctx.filter = 'contrast(1.3) grayscale(1)';
+          ctx.drawImage(video, 0, 0);
           
-          if (ctx) {
-            ctx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
-            
-            // Apply Image Preprocessing
-            preprocessImage(ctx, captureCanvas.width, captureCanvas.height);
-
-            // Update debug canvas if visible
-            if (showDebug && debugCanvasRef.current) {
-                const debugCtx = debugCanvasRef.current.getContext('2d');
-                if (debugCtx) {
-                    debugCanvasRef.current.width = captureCanvas.width / 4; // Scale down for preview
-                    debugCanvasRef.current.height = captureCanvas.height / 4;
-                    debugCtx.drawImage(captureCanvas, 0, 0, debugCanvasRef.current.width, debugCanvasRef.current.height);
-                }
-            }
-
-            const result = await Tesseract.recognize(captureCanvas, 'eng', {
-                // logger: m => console.log(m)
-            });
-
-            // Tesseract.js Page object structure: data -> blocks -> paragraphs -> lines -> words
-            const allWords: any[] = [];
-            result.data.blocks?.forEach((block: any) => {
-                block.paragraphs?.forEach((para: any) => {
-                    para.lines?.forEach((line: any) => {
-                        line.words?.forEach((word: any) => {
-                            allWords.push(word);
-                        });
-                    });
-                });
-            });
-
-            const blocks: OCRBlock[] = allWords.map(w => ({
+          // --- THE FIX ---
+          // We cast the result to 'any' to avoid the "Property words does not exist on type Page" build error
+          const result: any = await workerRef.current.recognize(captureCanvas);
+          const words = result.data.words || [];
+          
+          const blocks: OCRBlock[] = words
+            .filter((w: any) => w.confidence > 45) // Ignore blurry noise
+            .map((w: any) => ({
               text: w.text,
               bbox: {
                 x0: w.bbox.x0,
@@ -144,87 +120,84 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
                 y1: w.bbox.y1
               }
             }));
-            
-            // Only update if we found something, or at least log it
-            if (blocks.length > 0) {
-               setOcrBlocks(blocks);
-               // onLog(`Detected ${blocks.length} text blocks`, 'info'); // Too verbose
-            } else {
-               setOcrBlocks([]); 
-            }
-          }
 
+          setOcrBlocks(blocks);
+          if (blocks.length > 0) {
+            onLog(`Detected ${blocks.length} items`, 'info');
+          }
+        }
       } catch (err) {
-        console.error("OCR Error:", err);
-        // onLog('OCR processing failed', 'error');
+        console.error("OCR Runtime Error:", err);
       } finally {
         isProcessing = false;
       }
     };
 
-    if (isScanning) {
-        intervalId = setInterval(runOCR, 2000); // Run every 2 seconds
-        setTimeout(runOCR, 1000); 
+    if (isScanning && isWorkerReady) {
+      // Run immediately then every 2 seconds
+      runOCR();
+      intervalId = setInterval(runOCR, 2000);
+    } else {
+      setOcrBlocks([]); // Clear boxes when scanning stops
     }
 
     return () => clearInterval(intervalId);
-  }, [isScanning, onLog, showDebug]); // Added showDebug dependency
+  }, [isScanning, isWorkerReady, onLog]);
 
-  // Draw Bounding Boxes Overlay
+  // 4. Draw Interactive Overlay
   useEffect(() => {
-      const canvas = canvasRef.current;
-      const video = videoRef.current;
-      if (!canvas || !video) return;
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    if (!canvas || !video) return;
 
-      if (video.videoWidth > 0 && (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight)) {
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
-      }
+    if (video.videoWidth > 0 && (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight)) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
 
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      
-      ctx.strokeStyle = '#00ff00';
-      ctx.lineWidth = 2;
-      ctx.fillStyle = 'rgba(0, 255, 0, 0.2)';
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Styling for text boxes
+    ctx.strokeStyle = '#00ff00';
+    ctx.lineWidth = 3;
+    ctx.fillStyle = 'rgba(0, 255, 0, 0.1)';
 
-      ocrBlocks.forEach(block => {
-          const w = block.bbox.x1 - block.bbox.x0;
-          const h = block.bbox.y1 - block.bbox.y0;
-          ctx.strokeRect(block.bbox.x0, block.bbox.y0, w, h);
-          ctx.fillRect(block.bbox.x0, block.bbox.y0, w, h);
-      });
-
+    ocrBlocks.forEach(block => {
+      const { x0, y0, x1, y1 } = block.bbox;
+      const w = x1 - x0;
+      const h = y1 - y0;
+      ctx.strokeRect(x0, y0, w, h);
+      ctx.fillRect(x0, y0, w, h);
+    });
   }, [ocrBlocks]);
 
-
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
 
-      const x = (e.clientX - rect.left) * scaleX;
-      const y = (e.clientY - rect.top) * scaleY;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
 
-      const clickedBlock = ocrBlocks.find(b => 
-          x >= b.bbox.x0 && x <= b.bbox.x1 &&
-          y >= b.bbox.y0 && y <= b.bbox.y1
-      );
+    const clickedBlock = ocrBlocks.find(b => 
+      x >= b.bbox.x0 && x <= b.bbox.x1 &&
+      y >= b.bbox.y0 && y <= b.bbox.y1
+    );
 
-      if (clickedBlock) {
-          onTextSelected(clickedBlock.text);
-          onLog(`Selected: "${clickedBlock.text}"`, 'success');
-      }
+    if (clickedBlock) {
+      onTextSelected(clickedBlock.text);
+      onLog(`Selected: "${clickedBlock.text}"`, 'success');
+    }
   };
 
   return (
-    <div className="relative w-full h-full bg-black">
-      {/* Video Element */}
+    <div className="relative w-full h-full bg-black overflow-hidden">
       <video
         ref={videoRef}
         autoPlay
@@ -232,28 +205,18 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
         muted
         className="absolute inset-0 w-full h-full object-cover"
       />
-      
-      {/* Canvas Overlay for interactions */}
       <canvas
         ref={canvasRef}
         onClick={handleCanvasClick}
-        className="absolute inset-0 w-full h-full object-cover cursor-crosshair"
+        className="absolute inset-0 w-full h-full object-cover cursor-crosshair z-10"
       />
-
-      {/* Debug View Toggle */}
-      <div className="absolute top-4 left-4 z-50">
-          <button 
-             onClick={() => setShowDebug(!showDebug)}
-             className="bg-gray-800/50 text-white text-xs px-2 py-1 rounded border border-gray-600 hover:bg-gray-700"
-          >
-             {showDebug ? 'Hide Debug' : 'Show OCR View'}
-          </button>
-      </div>
-
-      {/* Debug Canvas */}
-      <div className={`absolute top-12 left-4 z-50 border border-green-500 bg-black ${showDebug ? 'block' : 'hidden'}`}>
-          <canvas ref={debugCanvasRef} className="w-48 h-auto" />
-      </div>
+      
+      {!isWorkerReady && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 text-white z-20">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mb-2"></div>
+          <p className="text-sm font-medium">Loading OCR Engine...</p>
+        </div>
+      )}
     </div>
   );
 }
