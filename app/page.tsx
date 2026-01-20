@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { LogEntry, VisualizationType } from '@/lib/types';
 import HUD from '@/components/HUD';
 import CameraFeed from '@/components/CameraFeed';
@@ -10,8 +10,7 @@ import TwoDScene from '@/components/renderers/TwoDScene';
 
 export default function Home() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [capturedText, setCapturedText] = useState<string>("");
-  const [selectedText, setSelectedText] = useState<string>("");
+  const [selectedTexts, setSelectedTexts] = useState<string[]>([]);
   const [isScanning, setIsScanning] = useState<boolean>(true);
   
   // Visualization State
@@ -31,34 +30,39 @@ export default function Home() {
     }]);
   };
 
-  const handleTextSelected = (text: string) => {
-    setSelectedText(text);
-    // Pause scanning when text is selected to let user decide
-    setIsScanning(false);
+  const handleSelectionChange = (texts: string[]) => {
+    setSelectedTexts(texts);
+    // Note: We don't pause scanning here to allow user to keep selecting, 
+    // but the CameraFeed handles the "Capture" state which effectively pauses.
   };
 
   const handleReset = () => {
-    setSelectedText("");
+    setSelectedTexts([]);
     setVizType(null);
     setVizScript("");
     setGlbUrl(null);
     setIsScanning(true);
-    addLog("System reset. Resume scanning.", "info");
+    addLog("System reset. Ready.", "info");
   };
 
   const handleVisualise = async () => {
-    if (!selectedText) return;
+    if (selectedTexts.length === 0) return;
 
-    addLog(`Analyzing: "${selectedText.substring(0, 30)}..."`, "info");
+    // Join all selected blocks into one prompt
+    const fullText = selectedTexts.join(" ");
+    addLog(`Analyzing: "${fullText.substring(0, 30)}..."`, "info");
     
     try {
       const res = await fetch('/api/visualize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: selectedText })
+        body: JSON.stringify({ text: fullText })
       });
 
-      if (!res.ok) throw new Error('Failed to fetch visualization plan');
+      if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || 'Failed to fetch visualization plan');
+      }
 
       const data = await res.json();
       addLog(`Decision: ${data.type} (${data.reasoning})`, "success");
@@ -102,7 +106,7 @@ export default function Home() {
         {/* Layer 1: Camera Feed */}
         <div className="absolute inset-0 z-0">
           <CameraFeed 
-            onTextSelected={handleTextSelected} 
+            onSelectionChange={handleSelectionChange} 
             onLog={addLog}
             isScanning={isScanning}
           />
@@ -143,22 +147,24 @@ export default function Home() {
 
           {/* Center Interaction Area */}
           <div className="flex-1 flex items-center justify-center pointer-events-none">
-             {selectedText && !vizType && (
+             {selectedTexts.length > 0 && !vizType && (
                 <div className="bg-black/80 border border-cyan-500 p-6 rounded-lg max-w-lg text-center backdrop-blur-md pointer-events-auto animate-in fade-in zoom-in duration-300">
-                    <h3 className="text-white text-lg mb-2">Text Detected</h3>
-                    <p className="text-cyan-200 mb-4 italic">"{selectedText}"</p>
+                    <h3 className="text-white text-lg mb-2">Selection</h3>
+                    <p className="text-cyan-200 mb-4 italic text-sm">
+                        {selectedTexts.length} segment(s) selected
+                    </p>
                     <div className="flex gap-4 justify-center">
                         <button 
                           className="bg-cyan-600 hover:bg-cyan-500 text-white px-6 py-2 rounded uppercase font-bold tracking-wide transition-all"
                           onClick={handleVisualise}
                         >
-                          Visualise
+                          Visualise ({selectedTexts.length})
                         </button>
                         <button 
                           className="border border-red-500 text-red-500 hover:bg-red-500/20 px-6 py-2 rounded uppercase font-bold tracking-wide transition-all"
                           onClick={handleReset}
                         >
-                          Cancel
+                          Clear
                         </button>
                     </div>
                 </div>
