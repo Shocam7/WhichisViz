@@ -16,7 +16,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'GEMINI_API_KEY not configured' }, { status: 500 });
     }
 
-    // Prompt Engineering
     const systemPrompt = `
       You are an expert educational visualizer. Your goal is to convert textbook text into 3D or 2D visualizations.
       
@@ -29,7 +28,7 @@ export async function POST(req: NextRequest) {
       - Use "3D" for: Biological models (cells, organs), mechanical models (engines, gears), specific historical artifacts, or single complex objects.
 
       Output Format:
-      Return ONLY a raw JSON object (no markdown formatting) with the following structure:
+      Return a JSON object with the following structure:
       {
         "type": "3D" | "2D",
         "reasoning": "Short explanation of your choice",
@@ -65,7 +64,10 @@ export async function POST(req: NextRequest) {
               }
             ]
           }
-        ]
+        ],
+        generationConfig: {
+            response_mime_type: "application/json"
+        }
       })
     });
 
@@ -85,7 +87,7 @@ export async function POST(req: NextRequest) {
 
     let generatedText = candidates[0].content.parts[0].text;
     
-    // Clean up potential Markdown code blocks
+    // Clean up potential Markdown code blocks if JSON mode didn't strip them cleanly (sometimes happens)
     generatedText = generatedText.replace(/```json/g, '').replace(/```/g, '').trim();
 
     let result: VisualizationResponse;
