@@ -5,15 +5,16 @@ import { OCRBlock, LogEntry } from '@/lib/types';
 import { Camera, RefreshCw } from 'lucide-react';
 
 interface CameraFeedProps {
-  onTextSelected: (text: string) => void;
+  onSelectionChange: (selectedTexts: string[]) => void;
   onLog: (message: string, type: LogEntry['type']) => void;
   isScanning: boolean;
 }
 
-export default function CameraFeed({ onTextSelected, onLog, isScanning }: CameraFeedProps) {
+export default function CameraFeed({ onSelectionChange, onLog, isScanning }: CameraFeedProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [ocrBlocks, setOcrBlocks] = useState<OCRBlock[]>([]);
+  const [selectedIndices, setSelectedIndices] = useState<number[]>([]);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -60,6 +61,8 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
 
       setIsProcessing(true);
       onLog("Capturing image...", 'info');
+      setSelectedIndices([]);
+      onSelectionChange([]);
 
       try {
           // Capture frame
@@ -107,6 +110,8 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
   const handleRetake = () => {
       setCapturedImage(null);
       setOcrBlocks([]);
+      setSelectedIndices([]);
+      onSelectionChange([]);
       onLog("Ready to scan", 'info');
   };
 
@@ -132,11 +137,8 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
       
       // Only draw if we have a captured image
       if (capturedImage) {
-          ctx.strokeStyle = '#00ff00';
-          ctx.lineWidth = 4;
-          ctx.fillStyle = 'rgba(0, 255, 0, 0.2)';
-
-          ocrBlocks.forEach(block => {
+          
+          ocrBlocks.forEach((block, index) => {
               const x0 = block.bbox.x0 * canvas.width;
               const y0 = block.bbox.y0 * canvas.height;
               const x1 = block.bbox.x1 * canvas.width;
@@ -145,12 +147,18 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
               const w = x1 - x0;
               const h = y1 - y0;
               
+              const isSelected = selectedIndices.includes(index);
+
+              ctx.strokeStyle = isSelected ? '#00ffff' : '#00ff00';
+              ctx.lineWidth = isSelected ? 4 : 2;
+              ctx.fillStyle = isSelected ? 'rgba(0, 255, 255, 0.3)' : 'rgba(0, 255, 0, 0.1)';
+              
               ctx.strokeRect(x0, y0, w, h);
               ctx.fillRect(x0, y0, w, h);
           });
       }
 
-  }, [ocrBlocks, capturedImage]);
+  }, [ocrBlocks, capturedImage, selectedIndices]);
 
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -169,14 +177,26 @@ export default function CameraFeed({ onTextSelected, onLog, isScanning }: Camera
       const normX = x / canvas.width;
       const normY = y / canvas.height;
 
-      const clickedBlock = ocrBlocks.find(b => 
+      // Toggle selection logic
+      const clickedIndex = ocrBlocks.findIndex(b => 
           normX >= b.bbox.x0 && normX <= b.bbox.x1 &&
           normY >= b.bbox.y0 && normY <= b.bbox.y1
       );
 
-      if (clickedBlock) {
-          onTextSelected(clickedBlock.text);
-          onLog(`Selected: "${clickedBlock.text.substring(0, 20)}..."`, 'success');
+      if (clickedIndex !== -1) {
+          const newIndices = selectedIndices.includes(clickedIndex)
+             ? selectedIndices.filter(i => i !== clickedIndex)
+             : [...selectedIndices, clickedIndex];
+          
+          setSelectedIndices(newIndices);
+          
+          // Map indices back to text content
+          const selectedTexts = newIndices.map(i => ocrBlocks[i].text);
+          onSelectionChange(selectedTexts);
+          
+          if (!selectedIndices.includes(clickedIndex)) {
+              onLog(`Selected: "${ocrBlocks[clickedIndex].text.substring(0, 20)}..."`, 'info');
+          }
       }
   };
 
