@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
     const payload = {
       contents: [{
         parts: [
-          { text: "Detect all text. Return JSON: { \"blocks\": [ { \"text\": \"string\", \"box_2d\": [ymin, xmin, ymax, xmax] } ] }. Scale 0-1000." },
+          { text: "Detect all text in the image. Group the detected text into complete sentences where possible. If a sentence spans multiple lines, return the bounding box that encompasses all lines of that sentence. Return JSON: { \"blocks\": [ { \"text\": \"string\", \"box_2d\": [ymin, xmin, ymax, xmax] } ] }. Scale 0-1000." },
           { 
             inline_data: { 
               mime_type: "image/jpeg", 
